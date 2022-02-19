@@ -38,12 +38,15 @@
   V0.2 - Fixed a bug where precipProb was looking at the hourly value, but hourly was not retrieved. Converted to
         using the minutely data for summary and precipProb. Since this requires a bigger json doc, switched to 
         a dynamic delaration for the doc object.
+ V0.3 - Updateed the low battery / sleep process to sleep for 1 hour if the voltage is below 3.3V. There is an
+        update to the esp32 board lib that changed the interface from U32 to U64 bit to allow for loner sleeps.
+        The new lib is on github but I did not install it yet...
+        https://github.com/esp8266/Arduino
+        https://thingpulse.com/max-deep-sleep-for-esp8266/ 
   
-  
-  This is still
-          a slight issue. If we want the prob of rain over say the next 15 minutes, then we need to get the minutue
-          forcast and average the prob for all the minutes over that time. However, there may be a memory limit since
-          when trying to get teh hourly, there is json parse error
+  This is still a slight issue. If we want the prob of rain over say the next 15 minutes, then we need
+  to get the minutue forcast and average the prob for all the minutes over that time. However, there may
+  be a memory limit since when trying to get the hourly, there is json parse error
  
 
   
@@ -400,6 +403,7 @@ void printTitle(String &Line1)
 
   DPRINTLN("Title y postition = " + String(ypos) );
 
+  Line1.remove(29);
   epd.setCursor(0,ypos);
   epd.print(Line1);
 }
@@ -542,6 +546,51 @@ void setup() {
   
   DPRINTLNF("ePaper display initialized");
 
+  // Check the current battery voltage
+  float analogBatteryReading = (float)analogRead(A13);
+  
+  // divide by 4095 to get % of max value
+  // assume adc attenuation set to 11db, so max reading is 3.3V - 
+  // measured voltage and calculated internal vref must be 1130mv rather than 1100mv...
+  // times 2 since feather uses a resistor divider in vbatt to divide by 2
+  // 2245 to 2249 = 2.072V
+  float callibratedBatteryVoltage = analogBatteryReading / 4095.0 * 3.3 * 1.139 * 2.0;
+ 
+  // If the battery voltage is low, then invert the display to allert the user...
+  if (callibratedBatteryVoltage < 3.5)
+  {
+    epd.setTextColor(EPD_INVERSE);
+    epd.fillScreen(EPD_BLACK);
+
+    // Critical Low battery test
+    if (callibratedBatteryVoltage < 3.4)
+    {
+      // alert the user
+      epd.setFont(bigfont);
+      epd.setCursor(20,80);
+      epd.print("LOW Battery !!");
+      epd.display();
+      
+      // power down ePaper display
+      epd.powerDown();
+      
+      // sleep for maximum time
+      ESP.deepSleep(3600 * 1e6);
+
+      //esp_err_t esp_sleep_enable_timer_wakeup(8 * 60 * 60 * 1000 * 1000);
+      //esp_deep_sleep_start(); // sleep 8hrs
+      //esp_err_t esp_deep_sleep_start();
+    }
+    
+  }
+  else 
+  {
+    epd.setTextColor(EPD_BLACK);    
+  }
+  
+  printVoltage(callibratedBatteryVoltage); 
+
+  
   // Initialize the wifi and connect to the network specified in secrets.h
   DPRINTLNF("Connecting to WiFi ");
 
@@ -578,31 +627,7 @@ void setup() {
     DPRINTF("Failed to connect to WiFi: ");
     DEBUG_PRINT(WIFI_SSID);
     DEBUG_PRINTLN(WIFI_PASSWORD);
-  }
-  
-  // Check the current battery voltage
-  float analogBatteryReading = (float)analogRead(A13);
-  
-  // divide by 4095 to get % of max value
-  // assume adc attenuation set to 11db, so max reading is 3.3V - 
-  // measured voltage and calculated internal vref must be 1130mv rather than 1100mv...
-  // times 2 since feather uses a resistor divider in vbatt to divide by 2
-  // 2245 to 2249 = 2.072V
-  float callibratedBatteryVoltage = analogBatteryReading / 4095.0 * 3.3 * 1.139 * 2.0;
-
-  // If the battery voltage is low, then invert the display to allert the user...
-  if (callibratedBatteryVoltage < 3.5)
-  {
-    epd.setTextColor(EPD_INVERSE);
-    epd.fillScreen(EPD_BLACK);
-  }
-  else 
-  {
-    epd.setTextColor(EPD_BLACK);    
-  }
-  
-  printVoltage(callibratedBatteryVoltage);
-  
+  }  
   // Create and print the title line
   
   asoftime = asoftime + (3600 * UTC_OFFSET);  // adjust the weather data timestamp for DST and timezone  
