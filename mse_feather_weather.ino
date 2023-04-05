@@ -42,9 +42,12 @@
         update to the esp32 board lib that changed the interface from U32 to U64 bit to allow for loner sleeps.
         The new lib is on github but I did not install it yet...
         https://github.com/esp8266/Arduino
-        https://thingpulse.com/max-deep-sleep-for-esp8266/ 
+        https://thingpulse.com/max-deep-sleep-for-esp8266/
+  V1.0 - The original dataa source, Dark Sky has gone dark (Apple purchased them) so switching local weahter data from CHART.
+        That interface does not allow specific queries, so the entire json data set is retrieved and then parsed to get the
+        desired data.
   
-  This is still a slight issue. If we want the prob of rain over say the next 15 minutes, then we need
+  OBE - This is still a slight issue. If we want the prob of rain over say the next 15 minutes, then we need
   to get the minutue forcast and average the prob for all the minutes over that time. However, there may
   be a memory limit since when trying to get the hourly, there is json parse error
  
@@ -105,12 +108,16 @@
 
 #include <Adafruit_GFX.h>    // Core graphics library https://learn.adafruit.com/adafruit-gfx-graphics-library/overview
 #include <HTTPClient.h>
-#include <ArduinoJson.h>     //https://github.com/bblanchon/ArduinoJson
+
+// CHART timestamps are epochs in miliseconds, so enable 64bit long data
+#define ARDUINOJSON_USE_LONG_LONG 1 
+#include <ArduinoJson.h>            //https://github.com/bblanchon/ArduinoJson
+
 #include <Adafruit_EPD.h>
 #include <TimeLib.h>
 #include "secrets.h"
 
-// # define DEBUG
+//#define DEBUG
 #include "DebugMacros.h"
 
 // define the # of seconds to sleep before waking up and getting a new quote
@@ -120,8 +127,8 @@
 #define WIFI_TIMEOUT 30
 
 // Offset in hours from UTC time
-#define UTC_OFFSET -5   // Standard Time
-//#define UTC_OFFSET -4     // Daylight Savings Time
+// #define UTC_OFFSET -5   // Standard Time
+#define UTC_OFFSET -4     // Daylight Savings Time
 
 // What fonts do you want to use?
 #include <Fonts/FreeSansBold9pt7b.h>
@@ -172,81 +179,6 @@ int getStringLength(const char *str, int strlength = 0)
   }
   epd.getTextBounds(buff, 0, 0, &x, &y, &w, &h);
   return(w);  
-}
-
-// word wrap routine
-// first time send string to wrap
-// 2nd and additional times: use empty string
-// returns substring of wrapped text.
-char *wrapWord(const char *str, int linesize)
-{
-  static char buff[255];
-  int linestart = 0;
-  static int lineend = 0;
-  static int bufflen = 0;
-  if(strlen(str) == 0)
-  {
-    // additional line from original string
-    linestart = lineend + 1;
-    lineend = bufflen;
-    
-    DPRINTLN("existing string to wrap, starting at position " + String(linestart) + ": " + String(&buff[linestart]));
-  }
-  else
-  {
-    DPRINTLN("new string to wrap: " + String(str));
-    
-    memset(buff,0,sizeof(buff));
-    // new string to wrap
-    linestart = 0;
-    strcpy(buff,str);
-    lineend = strlen(buff);
-    bufflen = strlen(buff);
-  }
-  uint16_t w;
-  int lastwordpos = linestart;
-  int wordpos = linestart + 1;
-  while(true)
-  {
-    while(buff[wordpos] == ' ' && wordpos < bufflen)
-      wordpos++;
-    while(buff[wordpos] != ' ' && wordpos < bufflen)
-      wordpos++;
-    if(wordpos < bufflen)
-      buff[wordpos] = '\0';
-    w = getStringLength(&buff[linestart]);
-    if(wordpos < bufflen)
-      buff[wordpos] = ' ';
-    if(w > linesize)
-    {
-      buff[lastwordpos] = '\0';
-      lineend = lastwordpos;
-      return &buff[linestart];
-    }
-    else if(wordpos >= bufflen)
-    {
-      // first word too long or end of string, send it anyway
-      buff[wordpos] = '\0';
-      lineend = wordpos;
-      return &buff[linestart];        
-    }
-    lastwordpos = wordpos;
-    wordpos++;
-  }
-}
-
-// return # of lines created from word wrap
-int getLineCount(const char *str, int scrwidth)
-{
-  int linecount = 0;
-  String line = wrapWord(str,scrwidth);
-
-  while(line.length() > 0)
-  {
-    linecount++;
-    line = wrapWord("",scrwidth);
-  }
-  return linecount;  
 }
 
 int getLineHeight(const GFXfont *font = NULL)
@@ -311,84 +243,91 @@ String getURLResponse(String url)
 
 
 void getWeather(time_t &asoftime,
-                String &summary, 
+                String &description, 
                 float &prob, 
-                float &temperature, 
-                float &dewPoint, 
-                float &humidity, 
+                String &airTemp, 
+                String &dewPoint, 
+                String &relativeHumidity, 
                 float &pressure, 
-                float &windSpeed, 
-                float &windBearing, 
-                float &visibility)  
+                String &windDescription, 
+                String &gustSpeed, 
+                String &precipitationType)  
 {
-  // Arduino JSON docs - https://arduinojson.org/book/deserialization_tutorial6.pdf#page=10
-  
-  // StaticJsonDocument<1024> doc;
-  DynamicJsonDocument doc(10000);
-  
   // Set the url, api key and get the weather data
-  String url = "https://api.darksky.net/forecast/84bc2d291eb87c91e2781fce14d0d53f/39.370788,-77.175910?exclude=hourly,daily,alerts,flags";
+  // String url = "https://api.darksky.net/forecast/84bc2d291eb87c91e2781fce14d0d53f/39.370788,-77.175910?exclude=hourly,daily,alerts,flags";
+  String url = "https://chart.maryland.gov/DataFeeds/GetRwisJson";
   String jsonweather = getURLResponse(url);
-
-  DEBUG_PRINTLN(jsonweather.length());
   
-  if(jsonweather.length() > 0)
+  int response_length = jsonweather.length();
+  DEBUG_PRINTLN(response_length);
+  
+  if(response_length > 0)
   {
+    // Arduino JSON docs - https://arduinojson.org/book/deserialization_tutorial6.pdf#page=10
+    // StaticJsonDocument<1024> doc;
+    // DynamicJsonDocument doc(response_length); 
+    
+    // Saze calcualted with arduinojson assistant
+    DynamicJsonDocument doc(32768);
+
     // remove start and end brackets, jsonBuffer is confused by them
     // jsonweather = jsonweather.substring(1,jsonweather.length()-1);
     
-    DEBUG_PRINT(jsonweather);
+    DEBUG_PRINTLN(jsonweather);
 
     DeserializationError error = deserializeJson(doc, jsonweather);
     if (error) 
     {   
-      DPRINTLNF("json parseObject() failed - bad json");
+      DPRINTLNF("json deserializeJson() failed - bad json");
+      DPRINTLNF(error.c_str());
 
-      summary = "json parse error";
+      description = "json parse error";
     }
     else
     {     
-      time_t ttime = doc["currently"]["time"];
-      asoftime = ttime;
-      // asoftime = doc["currently"]["time"];
-      
-      // V0.2 changed to minutely summary
-      String tsummary = doc["minutely"]["summary"];
-      summary = tsummary;
-      
-      // Compute the average probability over 15 minutes
-      prob = 0;
-      for (int minute = 0; minute < 15; minute++) {  
-        float tprobability = doc["minutely"]["data"][minute]["precipProbability"];
-        prob += tprobability;
-      }
-      prob = prob / 15.0;
-      
-      float ttemperature = doc["currently"]["temperature"];
-      temperature = ttemperature;
-      
-      float tdewPoint = doc["currently"]["dewPoint"];
-      dewPoint = tdewPoint;
-      
-      float thumidity = doc["currently"]["humidity"];
-      humidity = thumidity;
-      
-      float tpressure = doc["currently"]["pressure"];
-      pressure = tpressure;
-      
-      float twindspeed = doc["currently"]["windSpeed"];
-      windSpeed = twindspeed;
+      // Locate the desired weather station
+      for (JsonObject ws : doc.as<JsonArray>()) {
 
-      float twindBearing = doc["currently"]["windBearing"];
-      windBearing = twindBearing;
-      
-      float tvisibility = doc["currently"]["visibility"];
-      visibility = tvisibility;
-    }
-  }
+        // The weather station at MD27 & I70 is id = 116
+        const char* id = ws["id"]; // "199", "176", "161", "160", "159", "158", "157", "156", "155", "154", ...
+
+        if (!strcmp (id, "116") ){ 
+          // Extract the desired data
+          
+          //const char* description = ws["description"]; // "MD 20 at MD 21", "MD 231 at Patuxent River", "I-97 at ...
+          description = ws["description"].as<const char*>(); // "MD 20 at MD 21", "MD 231 at Patuxent River", "I-97 at ...
+          //double lon = ws["lon"]; // -76.18977, -76.6744, -76.643654, -76.008766, -75.83442, -76.33297, ...
+          //double lat = ws["lat"]; // 39.198036, 38.514896, 39.06376, 39.046642, 38.896606, 38.718906, 39.350243, ...
+          relativeHumidity = ws["relativeHumidity"].as<const char *>(); // "90%", "93%", "89%", "86%", "90%", "88%", ...
+          precipitationType = ws["precipitationType"].as<const char *>(); // "Rain", "Rain", "Rain", "Rain", "Rain", ...
+          //visibility = ws["visibility"].as<const char *>(); // nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, ...
+          dewPoint = ws["dewPoint"].as<const char *>(); // "58F", "61F", "59F", "59F", "58F", "58F", "59F", "59F", ...          
+          long long lastUpdate = ws["lastUpdate"]; // 1680353340000, 1680353400000, 1680353340000, ...
+          gustSpeed = ws["gustSpeed"].as<const char *>(); // "22 MPH", "23 MPH", "21 MPH", "24 MPH", "17 MPH", "23 ...
+          windDescription = ws["windDescription"].as<const char *>(); // "S 13 MPH", "SW 12 MPH", "SW 8 MPH", "S 14 ...
+          airTemp = ws["airTemp"].as<const char *>(); // "61F", "63F", "62F", "63F", "61F", "61F", "62F", "61F", "52F", ...
+          //const char* pavementTemp = ws["pavementTemp"]; // "60F to 60F", "62F to 62F", "61F to 62F", "61F to ...
+          //long long lastCachedDataUpdateTime = ws["lastCachedDataUpdateTime"]; // 1680353574865, 1680353574865, ...
+          //const char* name = ws["name"]; // "MD 20 at MD 21", "MD 231 at Patuxent River", "I-97 at MD 32", "US ...
+          //const char* id = ws["id"]; // "199", "176", "161", "160", "159", "158", "157", "156", "155", "154", ...
+          
+          asoftime = lastUpdate / 1000; // Convert epoch in ms to seconds
+          prob = 0.0;
+          pressure = 0.0;
+
+          DPRINT(id);
+          DPRINTLN(description);
+          DPRINTF(" ** Got it! Temp = ");
+          DPRINTLN(airTemp);
+
+          break;
+        } // found weather station
+      } // loop through all stations     
+    } // good deserialization
+  } // good http get
   else
   {
-    summary = "err: retrieving URL";
+    description = "err: retrieving URL";
   }
 }
 
@@ -511,16 +450,19 @@ void printVoltage(float batteryVoltage)
 
 void setup() {
 
+  // Weather data
   time_t  asoftime;
-  String  summary; 
-  float   prob, 
-          temperature, 
+
+  String  description, 
+          airTemp, 
           dewPoint, 
-          humidity, 
-          pressure, 
-          windSpeed, 
-          windBearing, 
-          visibility;
+          relativeHumidity,  
+          windDescription, 
+          gustSpeed, 
+          precipitationType;
+
+  float   prob,
+          pressure;
 
   SERIAL_BEGIN_WAIT(115200);
 
@@ -581,15 +523,14 @@ void setup() {
       //esp_deep_sleep_start(); // sleep 8hrs
       //esp_err_t esp_deep_sleep_start();
     }
-    
   }
+
   else 
   {
     epd.setTextColor(EPD_BLACK);    
   }
   
   printVoltage(callibratedBatteryVoltage); 
-
   
   // Initialize the wifi and connect to the network specified in secrets.h
   DPRINTLNF("Connecting to WiFi ");
@@ -609,50 +550,51 @@ void setup() {
     DPRINTLNF("connected");
 
     getWeather( asoftime,
-                summary, 
+                description, 
                 prob, 
-                temperature, 
+                airTemp, 
                 dewPoint, 
-                humidity, 
+                relativeHumidity, 
                 pressure, 
-                windSpeed, 
-                windBearing, 
-                visibility);  
+                windDescription, 
+                gustSpeed, 
+                precipitationType);
+
+   // Create and print the title line
+    asoftime = asoftime + (3600 * UTC_OFFSET);  // adjust the weather data timestamp for DST and timezone  
+    char buffer [10];
+    sprintf (buffer, "%02u:%02u - ", hour(asoftime), minute(asoftime));  
+    String titleLine(buffer);                   // convert the formatted time to a String  
+    titleLine += description;                   // aapend the summary to the time
+    printTitle(titleLine);
+
+    // Create and print the Big Data area
+    printBigData( airTemp, relativeHumidity );
+    
+    //printBigData( String(temperature,1), String(prob*100,0) + "%" );
+    //pressure = pressure * 0.02953;              // convert milibars to inches Hg
+
+    // Create and print the Small Data area
+
+    printSmallData( "BP - " + String(pressure,2) +"\"Hg",
+                    "DP - " + dewPoint,
+                    "WS - " + windDescription,
+                    "Gst - " + gustSpeed,
+                    "Prec - " + precipitationType );
+
+    // Create and print the attribution line                 
+    printOther("Powered by MDOT - CHART");
   }
   
   else
   {
-    summary = "err: WiFi timed out";
-    
+    description = "Error: WiFi timed out";
+    printTitle(description);
+   
     DPRINTF("Failed to connect to WiFi: ");
     DEBUG_PRINT(WIFI_SSID);
     DEBUG_PRINTLN(WIFI_PASSWORD);
   }  
-  // Create and print the title line
-  
-  asoftime = asoftime + (3600 * UTC_OFFSET);  // adjust the weather data timestamp for DST and timezone  
-  char buffer [10];
-  sprintf (buffer, "%02u:%02u - ", hour(asoftime), minute(asoftime));  
-  String titleLine(buffer);                   // convert the formatted time to a String  
-  titleLine += summary;                       // aapend the summary to the time
-  printTitle(titleLine);
-
-
-  // Create and print the Big Data area
-  
-  printBigData( String(temperature,1), String(prob*100,0) + "%" );
-  pressure = pressure * 0.02953;              // convert milibars to inches Hg
-
-  // Create and print the Small Data area
-    
-  printSmallData( "WS - " + String(windSpeed,1) + "@" + String(windBearing,0),
-                  "Hum  - " + String(humidity * 100,0) + "%",
-                  "BP  - " + String(pressure,2) +"\"Hg",
-                  "DP  - " + String(dewPoint,1),
-                  "Vis - " + String(visibility,1) + "mi" );
-
-  // Create and print the attribution line                 
-  printOther("Powered by Dark Sky");
 
   epd.display();
   
@@ -688,6 +630,15 @@ void loop() {
 
 
 /*
+Sample JSON data from the various sources
+
+*** CHART JSON Data
+
+{"description":"I-70 at MD 27","lon":-77.16696,"lat":39.358833,"relativeHumidity":"96%","precipitationType":"None","visibility":"","dewPoint":"60F","lastUpdate":1680353340000,"gustSpeed":"21 MPH","windDescription":"S 11 MPH","airTemp":"61F","pavementTemp":"59F to 59F","lastCachedDataUpdateTime":1680353574865,"name":"I-70 at MD 27","id":"116"}
+
+
+*** Dark Sky Data
+
 ets Jun  8 2016 00:22:57
 
 rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
@@ -710,14 +661,91 @@ getting url: https://api.darksky.net/forecast/84bc2d291eb87c91e2781fce14d0d53f/3
 
 {"latitude":39.370788,"longitude":-77.17591,"timezone":"America/New_York","currently":{"time":1567098091,"summary":"Clear","icon":"clear-day","nearestStormDistance":140,"nearestStormBearing":75,"precipIntensity":0,"precipProbability":0,"temperature":76,"apparentTemperature":76,"dewPoint":57.27,"humidity":0.52,"pressure":1016.01,"windSpeed":7.43,"windGust":7.43,"windBearing":295,"cloudCover":0.06,"uvIndex":8,"visibility":10,"ozone":302.3},"offset":-4}
 
+
+** Adafruit Quote Data
+
 [{"text":"Human history becomes more and more a race between education and catastrophe","author":"H. G. Wells"}]
-
-
 */
 
 
 /*
+// word wrap routine
+// first time send string to wrap
+// 2nd and additional times: use empty string
+// returns substring of wrapped text.
+char *wrapWord(const char *str, int linesize)
+{
+  static char buff[255];
+  int linestart = 0;
+  static int lineend = 0;
+  static int bufflen = 0;
+  if(strlen(str) == 0)
+  {
+    // additional line from original string
+    linestart = lineend + 1;
+    lineend = bufflen;
+    
+    DPRINTLN("existing string to wrap, starting at position " + String(linestart) + ": " + String(&buff[linestart]));
+  }
+  else
+  {
+    DPRINTLN("new string to wrap: " + String(str));
+    
+    memset(buff,0,sizeof(buff));
+    // new string to wrap
+    linestart = 0;
+    strcpy(buff,str);
+    lineend = strlen(buff);
+    bufflen = strlen(buff);
+  }
+  uint16_t w;
+  int lastwordpos = linestart;
+  int wordpos = linestart + 1;
+  while(true)
+  {
+    while(buff[wordpos] == ' ' && wordpos < bufflen)
+      wordpos++;
+    while(buff[wordpos] != ' ' && wordpos < bufflen)
+      wordpos++;
+    if(wordpos < bufflen)
+      buff[wordpos] = '\0';
+    w = getStringLength(&buff[linestart]);
+    if(wordpos < bufflen)
+      buff[wordpos] = ' ';
+    if(w > linesize)
+    {
+      buff[lastwordpos] = '\0';
+      lineend = lastwordpos;
+      return &buff[linestart];
+    }
+    else if(wordpos >= bufflen)
+    {
+      // first word too long or end of string, send it anyway
+      buff[wordpos] = '\0';
+      lineend = wordpos;
+      return &buff[linestart];        
+    }
+    lastwordpos = wordpos;
+    wordpos++;
+  }
+}
 
+// return # of lines created from word wrap
+int getLineCount(const char *str, int scrwidth)
+{
+  int linecount = 0;
+  String line = wrapWord(str,scrwidth);
+
+  while(line.length() > 0)
+  {
+    linecount++;
+    line = wrapWord("",scrwidth);
+  }
+  return linecount;  
+}
+*/
+
+/*
 void printQuote(String &quote)
 {
   int x = 0;
