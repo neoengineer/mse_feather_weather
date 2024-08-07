@@ -46,7 +46,9 @@
   V1.0 - The original dataa source, Dark Sky has gone dark (Apple purchased them) so switching local weahter data from CHART.
         That interface does not allow specific queries, so the entire json data set is retrieved and then parsed to get the
         desired data.
-  
+  V1.1 - The json parse error appears to be caused by an incomplete string being retrieed from the CHART URL. I added a retry
+       loop to repeat the fetch retry_count times.
+         
   OBE - This is still a slight issue. If we want the prob of rain over say the next 15 minutes, then we need
   to get the minutue forcast and average the prob for all the minutes over that time. However, there may
   be a memory limit since when trying to get the hourly, there is json parse error
@@ -108,6 +110,7 @@
 
 #include <Adafruit_GFX.h>    // Core graphics library https://learn.adafruit.com/adafruit-gfx-graphics-library/overview
 #include <HTTPClient.h>
+#include <WiFi.h>
 
 // CHART timestamps are epochs in miliseconds, so enable 64bit long data
 #define ARDUINOJSON_USE_LONG_LONG 1 
@@ -117,7 +120,7 @@
 #include <TimeLib.h>
 #include "secrets.h"
 
-//#define DEBUG
+ #define DEBUG
 #include "DebugMacros.h"
 
 // define the # of seconds to sleep before waking up and getting a new quote
@@ -127,8 +130,8 @@
 #define WIFI_TIMEOUT 30
 
 // Offset in hours from UTC time
-// #define UTC_OFFSET -5   // Standard Time
-#define UTC_OFFSET -4     // Daylight Savings Time
+#define UTC_OFFSET -5   // Standard Time
+// #define UTC_OFFSET -4     // Daylight Savings Time
 
 // What fonts do you want to use?
 #include <Fonts/FreeSansBold9pt7b.h>
@@ -253,82 +256,94 @@ void getWeather(time_t &asoftime,
                 String &gustSpeed, 
                 String &precipitationType)  
 {
-  // Set the url, api key and get the weather data
+  // Arduino JSON docs - https://arduinojson.org/book/deserialization_tutorial6.pdf#page=10
+  // StaticJsonDocument<1024> doc;
+  // DynamicJsonDocument doc(response_length); 
+    
+  // Size calcualted with arduinojson assistant
+  DynamicJsonDocument doc(32768);
+  
+  int retry_count = 3;
+  
+  // Set the url, api key
   // String url = "https://api.darksky.net/forecast/84bc2d291eb87c91e2781fce14d0d53f/39.370788,-77.175910?exclude=hourly,daily,alerts,flags";
   String url = "https://chart.maryland.gov/DataFeeds/GetRwisJson";
-  String jsonweather = getURLResponse(url);
   
-  int response_length = jsonweather.length();
-  DEBUG_PRINTLN(response_length);
+  while (retry_count)
+  {  
+    DPRINTF("Retry count = ");
+    DPRINTLN(retry_count);
+            
+    // Get the weather data
+    String jsonweather = getURLResponse(url);
+    retry_count--;
   
-  if(response_length > 0)
-  {
-    // Arduino JSON docs - https://arduinojson.org/book/deserialization_tutorial6.pdf#page=10
-    // StaticJsonDocument<1024> doc;
-    // DynamicJsonDocument doc(response_length); 
+    int response_length = jsonweather.length();
+    DEBUG_PRINTLN(response_length);
+  
+    if(response_length > 0)
+    {
+      // remove start and end brackets, jsonBuffer is confused by them
+      // jsonweather = jsonweather.substring(1,jsonweather.length()-1);
     
-    // Saze calcualted with arduinojson assistant
-    DynamicJsonDocument doc(32768);
+      DEBUG_PRINTLN(jsonweather);
 
-    // remove start and end brackets, jsonBuffer is confused by them
-    // jsonweather = jsonweather.substring(1,jsonweather.length()-1);
-    
-    DEBUG_PRINTLN(jsonweather);
+      DeserializationError error = deserializeJson(doc, jsonweather);
+      if (error) 
+      {   
+        DPRINTLNF("json deserializeJson() failed - bad json");
+        DPRINTLNF(error.c_str());
 
-    DeserializationError error = deserializeJson(doc, jsonweather);
-    if (error) 
-    {   
-      DPRINTLNF("json deserializeJson() failed - bad json");
-      DPRINTLNF(error.c_str());
+        description = "json parse error";
+      }
+      else
+      {     
+        // Locate the desired weather station
+        for (JsonObject ws : doc.as<JsonArray>()) {
 
-      description = "json parse error";
-    }
+          // The weather station at MD27 & I70 is id = 116
+          const char* id = ws["id"]; // "199", "176", "161", "160", "159", "158", "157", "156", "155", "154", ...
+
+          if (!strcmp (id, "116") ){ 
+            // Extract the desired data
+          
+            //const char* description = ws["description"]; // "MD 20 at MD 21", "MD 231 at Patuxent River", "I-97 at ...
+            description = ws["description"].as<const char*>(); // "MD 20 at MD 21", "MD 231 at Patuxent River", "I-97 at ...
+            //double lon = ws["lon"]; // -76.18977, -76.6744, -76.643654, -76.008766, -75.83442, -76.33297, ...
+            //double lat = ws["lat"]; // 39.198036, 38.514896, 39.06376, 39.046642, 38.896606, 38.718906, 39.350243, ...
+            relativeHumidity = ws["relativeHumidity"].as<const char *>(); // "90%", "93%", "89%", "86%", "90%", "88%", ...
+            precipitationType = ws["precipitationType"].as<const char *>(); // "Rain", "Rain", "Rain", "Rain", "Rain", ...
+            //visibility = ws["visibility"].as<const char *>(); // nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, ...
+            dewPoint = ws["dewPoint"].as<const char *>(); // "58F", "61F", "59F", "59F", "58F", "58F", "59F", "59F", ...          
+            long long lastUpdate = ws["lastUpdate"]; // 1680353340000, 1680353400000, 1680353340000, ...
+            gustSpeed = ws["gustSpeed"].as<const char *>(); // "22 MPH", "23 MPH", "21 MPH", "24 MPH", "17 MPH", "23 ...
+            windDescription = ws["windDescription"].as<const char *>(); // "S 13 MPH", "SW 12 MPH", "SW 8 MPH", "S 14 ...
+            airTemp = ws["airTemp"].as<const char *>(); // "61F", "63F", "62F", "63F", "61F", "61F", "62F", "61F", "52F", ...
+            //const char* pavementTemp = ws["pavementTemp"]; // "60F to 60F", "62F to 62F", "61F to 62F", "61F to ...
+            //long long lastCachedDataUpdateTime = ws["lastCachedDataUpdateTime"]; // 1680353574865, 1680353574865, ...
+            //const char* name = ws["name"]; // "MD 20 at MD 21", "MD 231 at Patuxent River", "I-97 at MD 32", "US ...
+            //const char* id = ws["id"]; // "199", "176", "161", "160", "159", "158", "157", "156", "155", "154", ...
+            
+            asoftime = lastUpdate / 1000; // Convert epoch in ms to seconds
+            prob = 0.0;
+            pressure = 0.0;
+
+            DPRINT(id);
+            DPRINTLN(description);
+            DPRINTF(" ** Got it! Temp = ");
+            DPRINTLN(airTemp);
+
+            retry_count = 0; // Found the desired data, so stop trying
+            break;
+          } // found weather station
+        } // loop through all stations     
+      } // good deserialization
+    } // good http get
     else
-    {     
-      // Locate the desired weather station
-      for (JsonObject ws : doc.as<JsonArray>()) {
-
-        // The weather station at MD27 & I70 is id = 116
-        const char* id = ws["id"]; // "199", "176", "161", "160", "159", "158", "157", "156", "155", "154", ...
-
-        if (!strcmp (id, "116") ){ 
-          // Extract the desired data
-          
-          //const char* description = ws["description"]; // "MD 20 at MD 21", "MD 231 at Patuxent River", "I-97 at ...
-          description = ws["description"].as<const char*>(); // "MD 20 at MD 21", "MD 231 at Patuxent River", "I-97 at ...
-          //double lon = ws["lon"]; // -76.18977, -76.6744, -76.643654, -76.008766, -75.83442, -76.33297, ...
-          //double lat = ws["lat"]; // 39.198036, 38.514896, 39.06376, 39.046642, 38.896606, 38.718906, 39.350243, ...
-          relativeHumidity = ws["relativeHumidity"].as<const char *>(); // "90%", "93%", "89%", "86%", "90%", "88%", ...
-          precipitationType = ws["precipitationType"].as<const char *>(); // "Rain", "Rain", "Rain", "Rain", "Rain", ...
-          //visibility = ws["visibility"].as<const char *>(); // nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, ...
-          dewPoint = ws["dewPoint"].as<const char *>(); // "58F", "61F", "59F", "59F", "58F", "58F", "59F", "59F", ...          
-          long long lastUpdate = ws["lastUpdate"]; // 1680353340000, 1680353400000, 1680353340000, ...
-          gustSpeed = ws["gustSpeed"].as<const char *>(); // "22 MPH", "23 MPH", "21 MPH", "24 MPH", "17 MPH", "23 ...
-          windDescription = ws["windDescription"].as<const char *>(); // "S 13 MPH", "SW 12 MPH", "SW 8 MPH", "S 14 ...
-          airTemp = ws["airTemp"].as<const char *>(); // "61F", "63F", "62F", "63F", "61F", "61F", "62F", "61F", "52F", ...
-          //const char* pavementTemp = ws["pavementTemp"]; // "60F to 60F", "62F to 62F", "61F to 62F", "61F to ...
-          //long long lastCachedDataUpdateTime = ws["lastCachedDataUpdateTime"]; // 1680353574865, 1680353574865, ...
-          //const char* name = ws["name"]; // "MD 20 at MD 21", "MD 231 at Patuxent River", "I-97 at MD 32", "US ...
-          //const char* id = ws["id"]; // "199", "176", "161", "160", "159", "158", "157", "156", "155", "154", ...
-          
-          asoftime = lastUpdate / 1000; // Convert epoch in ms to seconds
-          prob = 0.0;
-          pressure = 0.0;
-
-          DPRINT(id);
-          DPRINTLN(description);
-          DPRINTF(" ** Got it! Temp = ");
-          DPRINTLN(airTemp);
-
-          break;
-        } // found weather station
-      } // loop through all stations     
-    } // good deserialization
-  } // good http get
-  else
-  {
-    description = "err: retrieving URL";
-  }
+    {
+      description = "err: retrieving URL";
+    }
+  } // retry loop
 }
 
 
@@ -501,8 +516,8 @@ void setup() {
   // If the battery voltage is low, then invert the display to allert the user...
   if (callibratedBatteryVoltage < 3.5)
   {
-    epd.setTextColor(EPD_INVERSE);
-    epd.fillScreen(EPD_BLACK);
+    //TEM epd.setTextColor(EPD_INVERSE);
+    //TEM epd.fillScreen(EPD_BLACK);
 
     // Critical Low battery test
     if (callibratedBatteryVoltage < 3.4)
@@ -633,7 +648,9 @@ void loop() {
 Sample JSON data from the various sources
 
 *** CHART JSON Data
-
+https://chart.maryland.gov/DataFeeds/GetDataFeeds
+https://chartexp1.sha.maryland.gov/CHARTExportClientService/getRWISMapDataJSON.do
+t
 {"description":"I-70 at MD 27","lon":-77.16696,"lat":39.358833,"relativeHumidity":"96%","precipitationType":"None","visibility":"","dewPoint":"60F","lastUpdate":1680353340000,"gustSpeed":"21 MPH","windDescription":"S 11 MPH","airTemp":"61F","pavementTemp":"59F to 59F","lastCachedDataUpdateTime":1680353574865,"name":"I-70 at MD 27","id":"116"}
 
 
