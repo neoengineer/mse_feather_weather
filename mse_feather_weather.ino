@@ -120,7 +120,7 @@
 #include <TimeLib.h>
 #include "secrets.h"
 
- #define DEBUG
+//#define DEBUG
 #include "DebugMacros.h"
 
 // define the # of seconds to sleep before waking up and getting a new quote
@@ -130,8 +130,8 @@
 #define WIFI_TIMEOUT 30
 
 // Offset in hours from UTC time
-#define UTC_OFFSET -5   // Standard Time
-// #define UTC_OFFSET -4     // Daylight Savings Time
+// #define UTC_OFFSET -5   // Standard Time
+#define UTC_OFFSET -4     // Daylight Savings Time
 
 // What fonts do you want to use?
 #include <Fonts/FreeSansBold9pt7b.h>
@@ -258,10 +258,10 @@ void getWeather(time_t &asoftime,
 {
   // Arduino JSON docs - https://arduinojson.org/book/deserialization_tutorial6.pdf#page=10
   // StaticJsonDocument<1024> doc;
-  // DynamicJsonDocument doc(response_length); 
+  // DynamicJsonDocument doc(response_length);
+  // Changed to use json lib's new memory management 
     
-  // Size calcualted with arduinojson assistant
-  DynamicJsonDocument doc(32768);
+  JsonDocument doc;
   
   int retry_count = 3;
   
@@ -516,8 +516,8 @@ void setup() {
   // If the battery voltage is low, then invert the display to allert the user...
   if (callibratedBatteryVoltage < 3.5)
   {
-    //TEM epd.setTextColor(EPD_INVERSE);
-    //TEM epd.fillScreen(EPD_BLACK);
+    epd.setTextColor(EPD_WHITE);
+    epd.fillScreen(EPD_BLACK);
 
     // Critical Low battery test
     if (callibratedBatteryVoltage < 3.4)
